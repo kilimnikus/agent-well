@@ -1,0 +1,26 @@
+{
+  "name": "agent-well",
+  "version": "0.1.0",
+  "description": "Browser-based ACP client (agent-shell for the browser)",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-well": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "start": "node dist/index.js",
+    "dev": "tsc -p . --watch & node --watch dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.5",
+    "typescript": "^5.6.3"
+  }
+}

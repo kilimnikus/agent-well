@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#5881d8" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>agent-well</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+      crossorigin="anonymous"
+    />
+    <script
+      src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
+      crossorigin="anonymous"
+    ></script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="backdrop" id="backdrop"></div>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <h1>agent-well</h1>
+        <div class="sidebar-header-actions">
+          <button
+            id="new-session-btn"
+            class="primary"
+            title="Start a new agent session"
+          >
+            + New
+          </button>
+          <button
+            id="close-sidebar-btn"
+            class="ghost icon-btn sidebar-only-mobile"
+            aria-label="Close menu"
+          >
+            ×
+          </button>
+        </div>
+      </div>
+      <div class="sidebar-section-title">Sessions</div>
+      <ul class="session-list" id="session-list"></ul>
+      <div class="sidebar-footer" id="connection-status">connecting…</div>
+    </aside>
+
+    <main class="main" id="main">
+      <header class="topbar">
+        <button
+          id="open-sidebar-btn"
+          class="ghost icon-btn"
+          aria-label="Open menu"
+        >
+          <span class="hamburger" aria-hidden="true"></span>
+        </button>
+        <div class="topbar-title" id="topbar-title">agent-well</div>
+        <button
+          id="topbar-new-btn"
+          class="ghost icon-btn"
+          aria-label="New session"
+          title="New session"
+        >
+          +
+        </button>
+      </header>
+
+      <div class="empty-state" id="empty-state">
+        <h2>No session</h2>
+        <p>Tap <strong>+ New</strong> to start a session.</p>
+      </div>
+
+      <section class="session-view hidden" id="session-view">
+        <div class="session-subheader">
+          <span class="agent-badge" id="session-agent"></span>
+          <span class="session-cwd" id="session-cwd"></span>
+          <button id="cancel-btn" class="ghost small hidden" title="Cancel current turn">
+            Cancel
+          </button>
+          <button id="close-session-btn" class="ghost small" title="Close session">
+            Close
+          </button>
+        </div>
+        <div class="transcript" id="transcript"></div>
+        <form class="composer" id="composer">
+          <textarea
+            id="prompt-input"
+            rows="2"
+            placeholder="Message the agent…"
+            autocomplete="off"
+            autocapitalize="sentences"
+          ></textarea>
+          <div class="composer-row">
+            <span class="stop-reason" id="stop-reason"></span>
+            <button type="submit" class="primary" id="send-btn">Send</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <!-- New-session modal -->
+    <div class="modal hidden" id="new-session-modal">
+      <div class="modal-card">
+        <h2>New session</h2>
+        <label>
+          Agent
+          <select id="new-session-agent"></select>
+        </label>
+        <p class="hint" id="new-session-install-hint"></p>
+        <label>
+          Working directory
+          <input type="text" id="new-session-cwd" />
+        </label>
+        <div class="modal-actions">
+          <button class="ghost" id="new-session-cancel">Cancel</button>
+          <button class="primary" id="new-session-start">Start</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Permission modal -->
+    <div class="modal hidden" id="permission-modal">
+      <div class="modal-card">
+        <h2>Permission needed</h2>
+        <div id="permission-tool"></div>
+        <div class="permission-options" id="permission-options"></div>
+      </div>
+    </div>
+
+    <!-- Auth modal -->
+    <div class="modal hidden" id="auth-modal">
+      <div class="modal-card">
+        <h2>Authenticate</h2>
+        <p>This agent requires authentication. Pick a method:</p>
+        <div class="auth-options" id="auth-options"></div>
+        <div class="modal-actions">
+          <button class="ghost" id="auth-skip">Skip</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
