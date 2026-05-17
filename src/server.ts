@@ -1,8 +1,8 @@
 import http from "node:http";
 import { networkInterfaces } from "node:os";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { extname, join, normalize, resolve } from "node:path";
+import { dirname, extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TransportRegistry } from "./transport.js";
 import { logger } from "./util/log.js";
@@ -218,40 +218,121 @@ async function serveStatic(
       res.end("Not Found");
       return;
     }
-    // Cheap content-addressable validator: size + mtime ms. Changes every
-    // time the file is rewritten, so refreshes always pick up new code.
-    const etag = `W/"${st.size.toString(16)}-${st.mtimeMs.toString(16)}"`;
-    const lastModified = st.mtime.toUTCString();
-    const ifNoneMatch = req.headers["if-none-match"];
-    const ifModifiedSince = req.headers["if-modified-since"];
-    if (
-      ifNoneMatch === etag ||
-      (!ifNoneMatch &&
-        ifModifiedSince &&
-        Date.parse(ifModifiedSince) >= Math.floor(st.mtimeMs / 1000) * 1000)
-    ) {
+    const ext = extname(filePath);
+    // For HTML/JS we rewrite local references to carry `?v=<mtime>` so a
+    // mobile browser (which has no hard refresh) always sees a different URL
+    // whenever any dependency on disk has changed. The response is buffered
+    // and its content directly drives the ETag — when chat.js's mtime
+    // advances, app.js's served body changes, app.js's ETag changes, and the
+    // browser refetches app.js with the new chat.js URL inside.
+    let body: Buffer;
+    if (ext === ".html" || ext === ".js" || ext === ".mjs") {
+      const raw = await readFile(filePath, "utf8");
+      body = Buffer.from(await rewriteVersions(filePath, raw, ext));
+    } else {
+      body = await readFile(filePath);
+    }
+    const etag = `W/"${createHash("sha1")
+      .update(body)
+      .digest("base64url")
+      .slice(0, 22)}"`;
+    if (req.headers["if-none-match"] === etag) {
       res.statusCode = 304;
       res.setHeader("etag", etag);
-      res.setHeader("last-modified", lastModified);
       res.setHeader("cache-control", "no-cache");
       res.end();
       return;
     }
-    const body = await readFile(filePath);
     res.statusCode = 200;
-    res.setHeader(
-      "content-type",
-      MIME[extname(filePath)] ?? "application/octet-stream",
-    );
+    res.setHeader("content-type", MIME[ext] ?? "application/octet-stream");
     res.setHeader("cache-control", "no-cache");
     res.setHeader("etag", etag);
-    res.setHeader("last-modified", lastModified);
     res.end(body);
   } catch {
     res.statusCode = 404;
     res.setHeader("content-type", "text/plain; charset=utf-8");
     res.end("Not Found");
   }
+}
+
+// ---- cache-busting rewriter ----------------------------------------------
+
+/**
+ * Replace local subresource references with `path?v=<mtime>` so a single page
+ * reload (no hard refresh required) picks up new code. Only same-origin
+ * absolute or relative-to-file paths are touched — CDN URLs are left alone.
+ */
+async function rewriteVersions(
+  filePath: string,
+  body: string,
+  ext: string,
+): Promise<string> {
+  if (ext === ".html") {
+    // <link href="/x.css">, <script src="/x.js">
+    const matches: Array<{ start: number; end: number; replacement: string }> =
+      [];
+    const re = /(href|src)="(\/[^"?#]+\.(?:js|mjs|css))"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(body)) !== null) {
+      const v = await mtimeStamp(resolveAsset(m[2], filePath));
+      matches.push({
+        start: m.index,
+        end: m.index + m[0].length,
+        replacement: `${m[1]}="${m[2]}?v=${v}"`,
+      });
+    }
+    return spliceAll(body, matches);
+  }
+  if (ext === ".js" || ext === ".mjs") {
+    // ES module static imports/exports:
+    //   import X from "./y.js"
+    //   export { a } from "./y.js"
+    //   import "./y.js"
+    const matches: Array<{ start: number; end: number; replacement: string }> =
+      [];
+    const re =
+      /((?:\bfrom|\bimport)\s*\(?\s*["'])(\.[^"'?#\n]+\.m?js)(["'])/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(body)) !== null) {
+      const v = await mtimeStamp(resolveAsset(m[2], filePath));
+      matches.push({
+        start: m.index,
+        end: m.index + m[0].length,
+        replacement: `${m[1]}${m[2]}?v=${v}${m[3]}`,
+      });
+    }
+    return spliceAll(body, matches);
+  }
+  return body;
+}
+
+function resolveAsset(ref: string, sourceFile: string): string {
+  if (ref.startsWith("/")) return join(PUBLIC_DIR, ref.slice(1));
+  return resolve(dirname(sourceFile), ref);
+}
+
+async function mtimeStamp(absPath: string): Promise<string> {
+  try {
+    const s = await stat(absPath);
+    return Math.floor(s.mtimeMs).toString(36);
+  } catch {
+    return "0";
+  }
+}
+
+function spliceAll(
+  body: string,
+  matches: Array<{ start: number; end: number; replacement: string }>,
+): string {
+  if (!matches.length) return body;
+  let out = "";
+  let cursor = 0;
+  for (const m of matches) {
+    out += body.slice(cursor, m.start) + m.replacement;
+    cursor = m.end;
+  }
+  out += body.slice(cursor);
+  return out;
 }
 
 // ---- helpers --------------------------------------------------------------

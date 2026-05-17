@@ -51,6 +51,25 @@ function escapeAttr(s) {
   return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
 
+// Pass-through container tags. Unlike media (single-tag with attrs), these
+// wrap arbitrary markdown content. We preserve only the literal open/close
+// tags so the body inside still gets full markdown rendering.
+const RAW_TAG_RE = /<(\/?)(details|summary)((?:\s+open)?)\s*>/gi;
+
+function preserveRawTags(src, sink) {
+  return src.replace(RAW_TAG_RE, (_, slash, tag, attrs) => {
+    const safe = `<${slash}${tag.toLowerCase()}${attrs ? " open" : ""}>`;
+    const key = `\u0000RAW${sink.length}\u0000`;
+    sink.push(safe);
+    return key;
+  });
+}
+
+function restoreRawTags(html, sink) {
+  if (!sink.length) return html;
+  return html.replace(/\u0000RAW(\d+)\u0000/g, (_, i) => sink[Number(i)]);
+}
+
 function preserveMedia(src, sink) {
   const swap = (re) => (input) =>
     input.replace(re, (_, tag, attrs) => {
@@ -181,9 +200,14 @@ export function renderMarkdown(src) {
   if (!src) return "";
   const media = [];
   const math = [];
+  const raw = [];
   // Math is preserved first so $...$ inside it can't be touched by escapeHtml;
-  // media tags are preserved next so they survive paragraph wrapping.
-  const preprocessed = preserveMedia(preserveMath(src, math), media);
+  // media tags next so they survive paragraph wrapping; raw container tags
+  // (<details>/<summary>) last so the markdown body they wrap still renders.
+  const preprocessed = preserveRawTags(
+    preserveMedia(preserveMath(src, math), media),
+    raw,
+  );
   const lines = preprocessed.replace(/\r\n?/g, "\n").split("\n");
   const out = [];
   let i = 0;
@@ -262,5 +286,8 @@ export function renderMarkdown(src) {
     }
     out.push(`<p>${renderInline(buf.join(" "))}</p>`);
   }
-  return restoreMath(restoreMedia(out.join(""), media), math);
+  return restoreRawTags(
+    restoreMath(restoreMedia(out.join(""), media), math),
+    raw,
+  );
 }

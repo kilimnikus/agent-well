@@ -296,6 +296,47 @@ body.sidebar-open .sidebar { transform: translateX(0); }
 .markdown ul, .markdown ol { margin: 6px 0 6px 20px; padding: 0; }
 .markdown h1, .markdown h2, .markdown h3 { margin: 12px 0 6px; }
 
+/* Inline expandable sections — used by the agent to show changes /
+   long output without dominating the conversation. */
+.markdown details {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.markdown details > summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-weight: 500;
+  list-style: none;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-sunken);
+}
+.markdown details > summary::-webkit-details-marker { display: none; }
+.markdown details > summary::before {
+  content: "›";
+  color: var(--fg-muted);
+  display: inline-block;
+  transition: transform 0.15s;
+  width: 12px;
+}
+.markdown details[open] > summary::before { transform: rotate(90deg); }
+.markdown details > summary:hover { background: var(--border); }
+.markdown details > *:not(summary) { padding: 0 12px; }
+.markdown details > *:not(summary):first-of-type { padding-top: 10px; }
+.markdown details > *:not(summary):last-child { padding-bottom: 10px; }
+.bubble.user .markdown details {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.bubble.user .markdown details > summary {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 /* Embedded media (allowlisted: audio, video, img). Renders inline in chat
    bubbles and tool outputs. */
 .markdown audio,
