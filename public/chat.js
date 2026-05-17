@@ -133,6 +133,7 @@ export class TranscriptView {
         <span class="tool-status"></span>
         <span class="tool-kind"></span>
         <span class="tool-title"></span>
+        <span class="tool-summary"></span>
         <span class="tool-caret">›</span>
       </div>
       <div class="tool-body">
@@ -153,6 +154,13 @@ export class TranscriptView {
     }
     if (u.kind) {
       el.querySelector(".tool-kind").textContent = u.kind;
+      // Edit/Write tools matter most — auto-open them immediately, before the
+      // diff content streams in, so the user knows where it lives and the row
+      // doesn't appear collapsed-and-empty while the input is still streaming.
+      if (u.kind === "edit" && !el.dataset.autoOpened) {
+        el.classList.add("open");
+        el.dataset.autoOpened = "1";
+      }
     }
     if (u.title !== undefined) {
       el.querySelector(".tool-title").textContent = u.title ?? "";
@@ -164,8 +172,38 @@ export class TranscriptView {
     }
     if (u.content) {
       this.renderToolContent(el.querySelector(".tool-content"), u.content);
+      this.applyDiffSummary(el, u.content);
     }
     this.scrollToBottom();
+  }
+
+  /**
+   * If the tool call contains a diff, surface a `+N −M` summary in the header
+   * and auto-expand the row the first time so the user sees the change without
+   * clicking. Subsequent updates respect the user's collapse choice.
+   */
+  applyDiffSummary(el, content) {
+    let adds = 0;
+    let dels = 0;
+    let hasDiff = false;
+    for (const c of content) {
+      if (c.type !== "diff") continue;
+      hasDiff = true;
+      const s = diffStats(c);
+      adds += s.adds;
+      dels += s.dels;
+    }
+    const summary = el.querySelector(".tool-summary");
+    if (!hasDiff) {
+      summary.textContent = "";
+      return;
+    }
+    summary.innerHTML =
+      `<span class="add">+${adds}</span> <span class="del">−${dels}</span>`;
+    if (!el.dataset.autoOpened) {
+      el.classList.add("open");
+      el.dataset.autoOpened = "1";
+    }
   }
 
   renderToolContent(host, content) {
@@ -197,18 +235,41 @@ export class TranscriptView {
     path.className = "diff-path";
     path.textContent = diff.path;
     wrap.appendChild(path);
-    const oldLines = (diff.oldText ?? "").split("\n");
+    const body = document.createElement("div");
+    body.className = "diff-body";
+    wrap.appendChild(body);
+
+    const pureAdd = diff.oldText == null;
+    const oldLines = pureAdd ? [] : diff.oldText.split("\n");
     const newLines = (diff.newText ?? "").split("\n");
-    // Naive line-by-line diff.
+
+    if (pureAdd) {
+      // Write tool: every line is new.
+      newLines.forEach((line, i) => {
+        body.appendChild(diffLine("+", line, "add", null, i + 1));
+      });
+      return wrap;
+    }
+
+    // Edit tool: paired-line diff with gutters for old and new line numbers.
     const max = Math.max(oldLines.length, newLines.length);
+    let oldN = 1;
+    let newN = 1;
     for (let i = 0; i < max; i++) {
       const o = oldLines[i];
       const n = newLines[i];
       if (o === n) {
-        if (o !== undefined) wrap.appendChild(diffLine(" ", o));
+        if (o !== undefined) body.appendChild(diffLine(" ", o, "", oldN, newN));
+        if (o !== undefined) { oldN++; newN++; }
       } else {
-        if (o !== undefined) wrap.appendChild(diffLine("-", o, "del"));
-        if (n !== undefined) wrap.appendChild(diffLine("+", n, "add"));
+        if (o !== undefined) {
+          body.appendChild(diffLine("-", o, "del", oldN, null));
+          oldN++;
+        }
+        if (n !== undefined) {
+          body.appendChild(diffLine("+", n, "add", null, newN));
+          newN++;
+        }
       }
     }
     return wrap;
@@ -246,9 +307,43 @@ export class TranscriptView {
   }
 }
 
-function diffLine(prefix, text, kind) {
+function diffLine(prefix, text, kind, oldN, newN) {
   const el = document.createElement("div");
   el.className = "diff-line" + (kind ? ` ${kind}` : "");
-  el.textContent = prefix + " " + text;
+  const gOld = document.createElement("span");
+  gOld.className = "diff-gutter";
+  gOld.textContent = oldN ?? "";
+  const gNew = document.createElement("span");
+  gNew.className = "diff-gutter";
+  gNew.textContent = newN ?? "";
+  const mark = document.createElement("span");
+  mark.className = "diff-mark";
+  mark.textContent = prefix;
+  const code = document.createElement("span");
+  code.className = "diff-code";
+  code.textContent = text;
+  el.append(gOld, gNew, mark, code);
   return el;
+}
+
+function diffStats(diff) {
+  if (diff.oldText == null) {
+    const lines = (diff.newText ?? "").split("\n");
+    // Trailing empty line from split shouldn't count.
+    const adds = lines.length - (lines[lines.length - 1] === "" ? 1 : 0);
+    return { adds: Math.max(adds, 0), dels: 0 };
+  }
+  const oldLines = diff.oldText.split("\n");
+  const newLines = (diff.newText ?? "").split("\n");
+  const max = Math.max(oldLines.length, newLines.length);
+  let adds = 0;
+  let dels = 0;
+  for (let i = 0; i < max; i++) {
+    const o = oldLines[i];
+    const n = newLines[i];
+    if (o === n) continue;
+    if (o !== undefined) dels++;
+    if (n !== undefined) adds++;
+  }
+  return { adds, dels };
 }

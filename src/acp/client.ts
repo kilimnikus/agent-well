@@ -13,6 +13,20 @@ type Pending = {
   reject: (error: Error) => void;
 };
 
+/**
+ * Stderr lines from ACP agents that are known to be benign upstream noise.
+ * Matched lines are still logged, but at debug level so they don't clutter
+ * the default warn-level output.
+ *
+ * - claude-agent-acp's PostToolUse handler logs "No onPostToolUseHook found"
+ *   for tools it doesn't register a callback for (notably TodoWrite, which is
+ *   handled separately via the `plan` session update). Harmless; happens once
+ *   per TodoWrite call. See @agentclientprotocol/claude-agent-acp tools.js.
+ */
+const STDERR_NOISE: RegExp[] = [
+  /No onPostToolUseHook found for tool use ID:/,
+];
+
 export interface AcpClientOptions {
   command: string;
   args: string[];
@@ -100,7 +114,9 @@ export class AcpClient extends EventEmitter {
     while ((idx = this.stderrBuf.indexOf("\n")) >= 0) {
       const line = this.stderrBuf.slice(0, idx);
       this.stderrBuf = this.stderrBuf.slice(idx + 1);
-      if (line) logger.warn(`[acp:${this.label}:stderr] ${line}`);
+      if (!line) continue;
+      const level = STDERR_NOISE.some((p) => p.test(line)) ? "debug" : "warn";
+      logger[level](`[acp:${this.label}:stderr] ${line}`);
     }
   }
 

@@ -9,11 +9,11 @@
   },
   "scripts": {
     "build": "tsc -p .",
-    "start": "node dist/index.js",
-    "dev": "tsc -p . --watch & node --watch dist/index.js"
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "dev": "tsc -p . --watch & node --env-file-if-exists=.env --watch dist/index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.7"
   },
   "dependencies": {
     "qrcode": "^1.5.4"

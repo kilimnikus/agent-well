@@ -218,6 +218,25 @@ async function serveStatic(
       res.end("Not Found");
       return;
     }
+    // Cheap content-addressable validator: size + mtime ms. Changes every
+    // time the file is rewritten, so refreshes always pick up new code.
+    const etag = `W/"${st.size.toString(16)}-${st.mtimeMs.toString(16)}"`;
+    const lastModified = st.mtime.toUTCString();
+    const ifNoneMatch = req.headers["if-none-match"];
+    const ifModifiedSince = req.headers["if-modified-since"];
+    if (
+      ifNoneMatch === etag ||
+      (!ifNoneMatch &&
+        ifModifiedSince &&
+        Date.parse(ifModifiedSince) >= Math.floor(st.mtimeMs / 1000) * 1000)
+    ) {
+      res.statusCode = 304;
+      res.setHeader("etag", etag);
+      res.setHeader("last-modified", lastModified);
+      res.setHeader("cache-control", "no-cache");
+      res.end();
+      return;
+    }
     const body = await readFile(filePath);
     res.statusCode = 200;
     res.setHeader(
@@ -225,6 +244,8 @@ async function serveStatic(
       MIME[extname(filePath)] ?? "application/octet-stream",
     );
     res.setHeader("cache-control", "no-cache");
+    res.setHeader("etag", etag);
+    res.setHeader("last-modified", lastModified);
     res.end(body);
   } catch {
     res.statusCode = 404;

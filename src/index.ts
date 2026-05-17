@@ -5,8 +5,9 @@ import { startServer } from "./server.js";
 import { logger } from "./util/log.js";
 
 const PORT = Number(process.env.AGENT_WELL_PORT ?? "7777");
-// Reserved ngrok hostname. Set to empty string to skip the tunnel.
-const NGROK_URL = process.env.AGENT_WELL_NGROK_URL ?? "oleh.ngrok.io";
+// Reserved ngrok hostname. Configure in .env (AGENT_WELL_NGROK_URL=…) or
+// leave unset/empty to skip the tunnel entirely.
+const NGROK_URL = process.env.AGENT_WELL_NGROK_URL ?? "";
 
 async function main() {
   const server = await startServer({
