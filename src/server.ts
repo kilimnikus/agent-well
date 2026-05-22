@@ -1,5 +1,5 @@
 import http from "node:http";
-import { networkInterfaces } from "node:os";
+import { cpus, freemem, networkInterfaces, totalmem } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve } from "node:path";
@@ -105,10 +105,60 @@ async function route(
   if (!checkAuth(req, url, token, res)) return;
 
   const path = url.pathname;
+  if (path === "/api/sysstat" && req.method === "GET") {
+    return sendJson(res, 200, readSysStat());
+  }
   if (path.startsWith("/api/")) {
     return handleApi(req, res, url, registry);
   }
   return serveStatic(req, res, url, token);
+}
+
+// ---- system stats --------------------------------------------------------
+
+interface CpuSnapshot {
+  idle: number;
+  total: number;
+  at: number;
+}
+let prevCpu: CpuSnapshot = sampleCpu();
+let cachedCpuPercent = 0;
+
+function sampleCpu(): CpuSnapshot {
+  let idle = 0;
+  let total = 0;
+  for (const c of cpus()) {
+    const t = c.times;
+    idle += t.idle;
+    total += t.user + t.nice + t.sys + t.idle + t.irq;
+  }
+  return { idle, total, at: Date.now() };
+}
+
+function readSysStat(): {
+  cpu: number;
+  mem: { used: number; total: number; percent: number };
+} {
+  const now = sampleCpu();
+  // Avoid recomputing on bursty polls: keep the last value if <500ms elapsed.
+  if (now.at - prevCpu.at >= 500) {
+    const dIdle = now.idle - prevCpu.idle;
+    const dTotal = now.total - prevCpu.total;
+    cachedCpuPercent =
+      dTotal > 0 ? Math.max(0, Math.min(100, 100 * (1 - dIdle / dTotal))) : 0;
+    prevCpu = now;
+  }
+  const total = totalmem();
+  const free = freemem();
+  const used = total - free;
+  return {
+    cpu: Math.round(cachedCpuPercent),
+    mem: {
+      used,
+      total,
+      percent: total > 0 ? Math.round((100 * used) / total) : 0,
+    },
+  };
 }
 
 function checkAuth(

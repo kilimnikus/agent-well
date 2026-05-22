@@ -100,8 +100,15 @@ export class BrowserBridge {
   private sessions = new Map<string, ActiveSession>();
   private disposed = false;
 
-  constructor(private sink: (msg: Record<string, unknown>) => void) {
+  constructor(
+    private sink: (msg: Record<string, unknown>) => void,
+    private isSessionLiveElsewhere: (sessionId: string) => boolean,
+  ) {
     void this.sendInitial();
+  }
+
+  hasSession(id: string): boolean {
+    return this.sessions.has(id);
   }
 
   // ---- outbound: browser <- server ---------------------------------------
@@ -249,6 +256,20 @@ export class BrowserBridge {
   }) {
     const stored = await store.load(msg.sessionId);
     if (!stored) throw new Error(`Session not found: ${msg.sessionId}`);
+    // Refuse to spawn a second ACP for a session that's already alive in
+    // another connection (e.g. the original tab is still mid-prompt after a
+    // reload). The UI shows the persisted transcript read-only and the user
+    // can retry once the original tab is gone or idle-swept.
+    if (this.isSessionLiveElsewhere(msg.sessionId)) {
+      this.send({
+        type: "session_busy",
+        sessionId: stored.id,
+        agentId: stored.agentId,
+        cwd: stored.cwd,
+        transcript: stored.transcript,
+      });
+      return;
+    }
     const agentId = msg.agentId ?? stored.agentId;
     const cwd = msg.cwd ?? stored.cwd;
     const def = findAgent(agentId);

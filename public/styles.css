@@ -142,7 +142,23 @@ body.sidebar-open .sidebar { transform: translateX(0); }
   font-size: 12px;
   color: var(--fg-muted);
   border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
+
+.sysstat {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sysstat .sysstat-sep { opacity: 0.5; }
+.topbar .sysstat { margin: 0 6px; }
 
 /* --- Main column -------------------------------------------------------- */
 .main {

@@ -194,6 +194,9 @@ function onServerMessage(msg) {
     case "session_loaded":
       onSessionLoaded(msg);
       break;
+    case "session_busy":
+      onSessionBusy(msg);
+      break;
     case "session_update":
       onSessionUpdate(msg);
       break;
@@ -276,11 +279,14 @@ function shortenPath(p) {
 }
 
 function activateSession(s) {
-  if (state.sessions.has(s.id)) {
+  const existing = state.sessions.get(s.id);
+  if (existing && !existing.readOnly) {
     setActive(s.id);
     return;
   }
-  // Persisted session, need to resume.
+  // No live attachment yet, or attached read-only because the session was
+  // busy elsewhere — try (or retry) to resume.
+  if (existing?.readOnly) state.sessions.delete(s.id);
   send({ type: "load_session", sessionId: s.id, agentId: s.agentId, cwd: s.cwd });
 }
 
@@ -403,6 +409,20 @@ function onSessionLoaded(msg) {
   setActive(msg.sessionId);
 }
 
+function onSessionBusy(msg) {
+  const session = {
+    id: msg.sessionId,
+    agentId: msg.agentId,
+    cwd: msg.cwd,
+    title: undefined,
+    busy: false,
+    readOnly: true,
+    bufferedTranscript: msg.transcript ?? [],
+  };
+  state.sessions.set(msg.sessionId, session);
+  setActive(msg.sessionId);
+}
+
 // ---- composer --------------------------------------------------------------
 
 view.composer.addEventListener("submit", (e) => {
@@ -431,7 +451,7 @@ function submitPrompt() {
   const id = state.activeId;
   if (!id) return;
   const s = state.sessions.get(id);
-  if (!s || s.busy) return;
+  if (!s || s.busy || s.readOnly) return;
   const text = view.input.value.trim();
   if (!text) return;
   const prompt = [{ type: "text", text }];
@@ -459,14 +479,27 @@ view.cancelBtn.addEventListener("click", () => {
 view.closeBtn.addEventListener("click", () => {
   const id = state.activeId;
   if (!id) return;
+  const s = state.sessions.get(id);
+  if (s?.readOnly) {
+    // Server doesn't own this session in our connection — just detach locally.
+    state.sessions.delete(id);
+    setActive(null);
+    return;
+  }
   send({ type: "close_session", sessionId: id });
 });
 
 function updateBusyChrome() {
   const s = state.sessions.get(state.activeId);
   if (!s) return;
-  view.sendBtn.disabled = s.busy;
+  const locked = s.busy || s.readOnly;
+  view.sendBtn.disabled = locked;
+  view.input.disabled = !!s.readOnly;
   view.cancelBtn.classList.toggle("hidden", !s.busy);
+  if (s.readOnly) {
+    view.stopReason.textContent =
+      "open in another tab — click again in the sidebar to take over";
+  }
 }
 
 function onSessionUpdate(msg) {
@@ -614,3 +647,37 @@ function escapeHtml(s) {
 }
 
 connect();
+
+// ---- sysstat (CPU / memory) -----------------------------------------------
+
+const SYSSTAT_INTERVAL_MS = 2000;
+const sysstatTargets = [
+  document.getElementById("sysstat-topbar"),
+  document.getElementById("sysstat-sidebar"),
+].filter(Boolean);
+
+function formatBytes(n) {
+  const gb = n / (1024 ** 3);
+  if (gb >= 1) return gb.toFixed(1) + "G";
+  const mb = n / (1024 ** 2);
+  return Math.round(mb) + "M";
+}
+
+async function pollSysStat() {
+  try {
+    const res = await fetch("/api/sysstat");
+    if (!res.ok) throw new Error(`sysstat ${res.status}`);
+    const data = await res.json();
+    const cpuText = `CPU ${data.cpu}%`;
+    const memText = `MEM ${data.mem.percent}% (${formatBytes(data.mem.used)}/${formatBytes(data.mem.total)})`;
+    for (const el of sysstatTargets) {
+      el.querySelector(".sysstat-cpu").textContent = cpuText;
+      el.querySelector(".sysstat-mem").textContent = memText;
+    }
+  } catch {
+    // next tick will retry
+  }
+}
+
+pollSysStat();
+setInterval(pollSysStat, SYSSTAT_INTERVAL_MS);

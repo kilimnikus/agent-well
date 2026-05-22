@@ -80,11 +80,27 @@ export class TransportRegistry {
   connect(): Connection {
     const id = randomUUID();
     const queue = new EventQueue();
-    const bridge = new BrowserBridge((msg) => queue.enqueue(msg));
+    const bridge = new BrowserBridge(
+      (msg) => queue.enqueue(msg),
+      (sessionId) => this.isSessionLive(sessionId),
+    );
     const conn: Connection = { id, bridge, queue, lastActivity: Date.now() };
     this.conns.set(id, conn);
     logger.info(`transport: connected ${id} (${this.conns.size} active)`);
     return conn;
+  }
+
+  /**
+   * True iff some live bridge already owns an ACP process for this session.
+   * Used to reject a second `load_session` on the same id (e.g. after a page
+   * reload while the first tab's ACP is still mid-prompt) so two agents don't
+   * race on the same transcript file.
+   */
+  isSessionLive(sessionId: string): boolean {
+    for (const c of this.conns.values()) {
+      if (c.bridge.hasSession(sessionId)) return true;
+    }
+    return false;
   }
 
   get(id: string): Connection | undefined {

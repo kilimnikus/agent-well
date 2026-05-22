@@ -46,7 +46,14 @@
       </div>
       <div class="sidebar-section-title">Sessions</div>
       <ul class="session-list" id="session-list"></ul>
-      <div class="sidebar-footer" id="connection-status">connecting…</div>
+      <div class="sidebar-footer">
+        <div id="connection-status">connecting…</div>
+        <div class="sysstat" id="sysstat-sidebar" title="CPU / memory">
+          <span class="sysstat-cpu">CPU —</span>
+          <span class="sysstat-sep">·</span>
+          <span class="sysstat-mem">MEM —</span>
+        </div>
+      </div>
     </aside>
 
     <main class="main" id="main">
@@ -59,6 +66,11 @@
           <span class="hamburger" aria-hidden="true"></span>
         </button>
         <div class="topbar-title" id="topbar-title">agent-well</div>
+        <div class="sysstat" id="sysstat-topbar" title="CPU / memory">
+          <span class="sysstat-cpu">CPU —</span>
+          <span class="sysstat-sep">·</span>
+          <span class="sysstat-mem">MEM —</span>
+        </div>
         <button
           id="topbar-new-btn"
           class="ghost icon-btn"
