@@ -1,55 +1,17 @@
-import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { AcpClient } from "./acp/client.js";
-import { ACP_PROTOCOL_VERSION, CLIENT_CAPABILITIES } from "./acp/constants.js";
-import {
-  AuthenticateParams,
-  CancelParams,
-  ContentBlock,
-  InitializeResult,
-  NewSessionResult,
-  PermissionOption,
-  PromptResult,
-  ReadTextFileParams,
-  ReadTextFileResult,
-  RequestPermissionParams,
-  RequestPermissionResult,
-  SessionNotification,
-  SessionUpdate,
-  TerminalCreateParams,
-  TerminalKillParams,
-  TerminalOutputParams,
-  TerminalReleaseParams,
-  TerminalWaitParams,
-  WriteTextFileParams,
-} from "./acp/types.js";
-import { BUILTIN_AGENTS, findAgent } from "./agents/registry.js";
-import { readTextFile, writeTextFile } from "./handlers/fs.js";
-import { TerminalManager } from "./handlers/terminal.js";
+import { ContentBlock } from "./acp/types.js";
+import { BUILTIN_AGENTS } from "./agents/registry.js";
+import { SessionHost, Sink } from "./sessions/host.js";
+import { SessionRegistry } from "./sessions/registry.js";
 import * as store from "./sessions/store.js";
 import { logger } from "./util/log.js";
-
-interface ActiveSession {
-  id: string;
-  agentId: string;
-  cwd: string;
-  acp: AcpClient;
-  terminals: TerminalManager;
-  /** Map permissionRequestId -> waiter that resolves with the user's choice. */
-  pendingPermissions: Map<string, (r: RequestPermissionResult) => void>;
-  modes?: NewSessionResult["modes"];
-  authMethods?: InitializeResult["authMethods"];
-  title?: string;
-  /** True once the embed-capable preamble has been delivered on this ACP process. */
-  primed?: boolean;
-}
 
 /**
  * Preamble we attach to the first prompt of every ACP session so the agent
  * knows the client renders a small allowlist of HTML media tags and is
  * encouraged to emit them inline — for final results and intermediate updates.
  */
-const EMBED_PREAMBLE: string = [
+export const EMBED_PREAMBLE: string = [
   "[agent-well client capabilities]",
   "Your output is rendered in a chat UI with these inline rendering features:",
   "",
@@ -91,34 +53,31 @@ const EMBED_PREAMBLE: string = [
 ].join("\n");
 
 /**
- * Per-tab bridge instance. Manages a set of agent sessions for one browser
- * client, routing messages between the browser and ACP subprocesses. The
- * transport (long-poll, WS, etc.) is provided via a generic `send` sink so
- * this class doesn't know how its events reach the client.
+ * Per-tab bridge: routes browser commands to the process-level SessionRegistry
+ * and forwards host events back over the bridge's sink. Holds no agent state
+ * of its own — `dispose()` only detaches from hosts; the hosts (and their
+ * ACP subprocesses) survive an idle-swept transport connection.
  */
 export class BrowserBridge {
-  private sessions = new Map<string, ActiveSession>();
+  private attached = new Map<string, SessionHost>();
   private disposed = false;
+  private sink: Sink;
 
   constructor(
-    private sink: (msg: Record<string, unknown>) => void,
-    private isSessionLiveElsewhere: (sessionId: string) => boolean,
+    sink: Sink,
+    private registry: SessionRegistry,
   ) {
+    this.sink = (msg) => {
+      if (this.disposed) return;
+      sink(msg);
+    };
     void this.sendInitial();
   }
 
-  hasSession(id: string): boolean {
-    return this.sessions.has(id);
-  }
-
-  // ---- outbound: browser <- server ---------------------------------------
-
   private send(msg: Record<string, unknown>) {
-    if (this.disposed) return;
     this.sink(msg);
   }
 
-  /** Invoked by the transport for each command POSTed by the browser. */
   handleClientMessage(msg: { type: string; [k: string]: unknown }) {
     return this.handle(msg).catch((err) => {
       const e = err as Error;
@@ -132,15 +91,17 @@ export class BrowserBridge {
     });
   }
 
-  /** Tear down all sessions; called when the client disconnects. */
+  /**
+   * Tear down the bridge. Detaches from any attached hosts but does NOT close
+   * them — agents keep running and a future bridge can re-attach.
+   */
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    for (const session of this.sessions.values()) {
-      session.terminals.killAll();
-      session.acp.kill();
+    for (const host of this.attached.values()) {
+      host.detach(this.sink);
     }
-    this.sessions.clear();
+    this.attached.clear();
   }
 
   private async sendInitial() {
@@ -165,8 +126,6 @@ export class BrowserBridge {
       home: homedir(),
     });
   }
-
-  // ---- inbound: browser -> server ----------------------------------------
 
   private async handle(msg: { type: string; [k: string]: unknown }) {
     switch (msg.type) {
@@ -196,7 +155,10 @@ export class BrowserBridge {
     }
   }
 
-  // ---- commands -----------------------------------------------------------
+  private attachHost(host: SessionHost): void {
+    host.attach(this.sink);
+    this.attached.set(host.id, host);
+  }
 
   private async cmdNewSession(msg: {
     agentId: string;
@@ -204,48 +166,21 @@ export class BrowserBridge {
     mcpServers?: unknown[];
     clientSessionId?: string;
   }) {
-    const def = findAgent(msg.agentId);
-    if (!def) throw new Error(`Unknown agent: ${msg.agentId}`);
-    const acp = this.spawnAgent(def.id, def.command, def.args, msg.cwd);
-
-    const init = (await acp.call<InitializeResult>("initialize", {
-      protocolVersion: ACP_PROTOCOL_VERSION,
-      clientCapabilities: CLIENT_CAPABILITIES,
-    })) as InitializeResult;
-
-    const newSession = (await acp.call<NewSessionResult>("session/new", {
+    const host = await this.registry.createNew({
+      agentId: msg.agentId,
       cwd: msg.cwd,
-      mcpServers: msg.mcpServers ?? [],
-    })) as NewSessionResult;
-
-    const session = this.registerSession({
-      id: newSession.sessionId,
-      agentId: def.id,
-      cwd: msg.cwd,
-      acp,
-      modes: newSession.modes,
-      authMethods: init.authMethods,
+      mcpServers: msg.mcpServers,
     });
-
-    await store.save({
-      id: session.id,
-      agentId: def.id,
-      cwd: msg.cwd,
-      mcpServers: (msg.mcpServers as unknown[]) ?? [],
-      createdAt: new Date().toISOString(),
-      lastActiveAt: new Date().toISOString(),
-      transcript: [],
-    });
-
+    this.attachHost(host);
     this.send({
       type: "session_created",
       clientSessionId: msg.clientSessionId,
-      sessionId: session.id,
-      agentId: def.id,
-      cwd: msg.cwd,
-      modes: newSession.modes,
-      authMethods: init.authMethods ?? [],
-      agentCapabilities: init.agentCapabilities ?? {},
+      sessionId: host.id,
+      agentId: host.agentId,
+      cwd: host.cwd,
+      modes: host.modes,
+      authMethods: host.authMethods ?? [],
+      agentCapabilities: host.agentCapabilities ?? {},
     });
   }
 
@@ -254,57 +189,48 @@ export class BrowserBridge {
     agentId?: string;
     cwd?: string;
   }) {
-    const stored = await store.load(msg.sessionId);
-    if (!stored) throw new Error(`Session not found: ${msg.sessionId}`);
-    // Refuse to spawn a second ACP for a session that's already alive in
-    // another connection (e.g. the original tab is still mid-prompt after a
-    // reload). The UI shows the persisted transcript read-only and the user
-    // can retry once the original tab is gone or idle-swept.
-    if (this.isSessionLiveElsewhere(msg.sessionId)) {
+    const existing = this.registry.get(msg.sessionId);
+    // Only one bridge may write to a session at a time. If another tab is
+    // attached, show this tab the persisted transcript read-only.
+    if (existing && existing.isAttached() && !this.attached.has(existing.id)) {
+      const stored = await store.load(msg.sessionId);
       this.send({
         type: "session_busy",
-        sessionId: stored.id,
-        agentId: stored.agentId,
-        cwd: stored.cwd,
-        transcript: stored.transcript,
+        sessionId: existing.id,
+        agentId: existing.agentId,
+        cwd: existing.cwd,
+        transcript: stored?.transcript ?? [],
       });
       return;
     }
-    const agentId = msg.agentId ?? stored.agentId;
-    const cwd = msg.cwd ?? stored.cwd;
-    const def = findAgent(agentId);
-    if (!def) throw new Error(`Unknown agent: ${agentId}`);
 
-    const acp = this.spawnAgent(def.id, def.command, def.args, cwd);
-    const init = (await acp.call<InitializeResult>("initialize", {
-      protocolVersion: ACP_PROTOCOL_VERSION,
-      clientCapabilities: CLIENT_CAPABILITIES,
-    })) as InitializeResult;
-    if (init.agentCapabilities?.loadSession !== true) {
-      acp.kill();
-      throw new Error(`Agent ${agentId} does not support session resume`);
+    const stored = await store.load(msg.sessionId);
+    if (!stored) {
+      this.send({
+        type: "error",
+        context: "load_session",
+        sessionId: msg.sessionId,
+        message: `Session not found: ${msg.sessionId}`,
+      });
+      return;
     }
-    await acp.call("session/load", {
-      sessionId: stored.id,
-      cwd,
-      mcpServers: stored.mcpServers ?? [],
-    });
 
-    const session = this.registerSession({
-      id: stored.id,
-      agentId,
-      cwd,
-      acp,
-      authMethods: init.authMethods,
+    const host = await this.registry.resume({
+      sessionId: msg.sessionId,
+      agentId: msg.agentId,
+      cwd: msg.cwd,
     });
+    // If we're already attached (e.g. duplicate load_session), don't re-attach.
+    if (!this.attached.has(host.id)) this.attachHost(host);
 
     this.send({
       type: "session_loaded",
-      sessionId: session.id,
-      agentId,
-      cwd,
+      sessionId: host.id,
+      agentId: host.agentId,
+      cwd: host.cwd,
       transcript: stored.transcript,
-      agentCapabilities: init.agentCapabilities ?? {},
+      busy: host.busy,
+      agentCapabilities: host.agentCapabilities ?? {},
     });
   }
 
@@ -312,71 +238,39 @@ export class BrowserBridge {
     sessionId: string;
     methodId: string;
   }) {
-    const session = this.requireSession(msg.sessionId);
-    const params: AuthenticateParams = { methodId: msg.methodId };
-    await session.acp.call("authenticate", params);
-    this.send({ type: "authenticated", sessionId: session.id });
+    const host = this.requireAttached(msg.sessionId);
+    await host.authenticate(msg.methodId);
   }
 
   private async cmdPrompt(msg: {
     sessionId: string;
     prompt: ContentBlock[];
   }) {
-    const session = this.requireSession(msg.sessionId);
-    void store
-      .update(session.id, (s) => {
-        s.transcript.push({
-          kind: "user_prompt",
-          at: new Date().toISOString(),
-          content: msg.prompt,
-        });
-        s.lastActiveAt = new Date().toISOString();
-        if (!s.title) s.title = derivePromptTitle(msg.prompt);
-      })
-      .catch((err) => logger.warn("persist prompt failed", err));
-
-    const forwardedPrompt: ContentBlock[] = session.primed
-      ? msg.prompt
-      : [{ type: "text", text: EMBED_PREAMBLE }, ...msg.prompt];
-    session.primed = true;
-
-    try {
-      const result = (await session.acp.call<PromptResult>("session/prompt", {
-        sessionId: session.id,
-        prompt: forwardedPrompt,
-      })) as PromptResult;
-      this.send({
-        type: "prompt_complete",
-        sessionId: session.id,
-        stopReason: result.stopReason,
-      });
-      void this.persistPromptComplete(session.id, result.stopReason);
-    } catch (err) {
-      this.send({
-        type: "prompt_error",
-        sessionId: session.id,
-        message: (err as Error).message,
-      });
-    }
+    const host = this.requireAttached(msg.sessionId);
+    await host.prompt(msg.prompt);
   }
 
   private async cmdCancel(msg: { sessionId: string }) {
-    const session = this.requireSession(msg.sessionId);
-    const params: CancelParams = { sessionId: session.id };
-    session.acp.notify("session/cancel", params);
+    const host = this.requireAttached(msg.sessionId);
+    host.cancel();
   }
 
   private async cmdCloseSession(msg: { sessionId: string }) {
-    const session = this.sessions.get(msg.sessionId);
-    if (!session) return;
-    session.terminals.killAll();
-    session.acp.kill();
-    this.sessions.delete(msg.sessionId);
-    this.send({ type: "session_closed", sessionId: msg.sessionId });
+    const host = this.attached.get(msg.sessionId);
+    this.attached.delete(msg.sessionId);
+    if (host) {
+      host.detach(this.sink);
+      host.close();
+    }
   }
 
   private async cmdDeleteSession(msg: { sessionId: string }) {
-    await this.cmdCloseSession(msg);
+    const host = this.registry.get(msg.sessionId);
+    this.attached.delete(msg.sessionId);
+    if (host) {
+      host.detach(this.sink);
+      host.close();
+    }
     await store.remove(msg.sessionId);
     this.send({ type: "session_deleted", sessionId: msg.sessionId });
   }
@@ -387,151 +281,13 @@ export class BrowserBridge {
     outcome: "cancelled" | "selected";
     optionId?: string;
   }) {
-    const session = this.requireSession(msg.sessionId);
-    const waiter = session.pendingPermissions.get(msg.requestId);
-    if (!waiter) {
-      logger.warn("permission response for unknown request", msg.requestId);
-      return;
-    }
-    session.pendingPermissions.delete(msg.requestId);
-    if (msg.outcome === "selected" && msg.optionId) {
-      waiter({ outcome: { outcome: "selected", optionId: msg.optionId } });
-    } else {
-      waiter({ outcome: { outcome: "cancelled" } });
-    }
+    const host = this.requireAttached(msg.sessionId);
+    host.permissionResponse(msg.requestId, msg.outcome, msg.optionId);
   }
 
-  // ---- session lifecycle --------------------------------------------------
-
-  private spawnAgent(label: string, command: string, args: string[], cwd: string) {
-    try {
-      return new AcpClient({ label, command, args, cwd });
-    } catch (err) {
-      throw new Error(
-        `Failed to spawn agent '${label}' (${command}): ${(err as Error).message}`,
-      );
-    }
+  private requireAttached(id: string): SessionHost {
+    const host = this.attached.get(id);
+    if (!host) throw new Error(`Session not attached: ${id}`);
+    return host;
   }
-
-  private registerSession(s: Omit<ActiveSession, "terminals" | "pendingPermissions">) {
-    const session: ActiveSession = {
-      ...s,
-      terminals: new TerminalManager(),
-      pendingPermissions: new Map(),
-    };
-    this.sessions.set(session.id, session);
-    this.wireAcpHandlers(session);
-    return session;
-  }
-
-  private wireAcpHandlers(session: ActiveSession) {
-    const { acp } = session;
-
-    acp.onNotification("session/update", (params) => {
-      const n = params as SessionNotification;
-      if (!n || n.sessionId !== session.id) return;
-      this.send({
-        type: "session_update",
-        sessionId: session.id,
-        update: n.update,
-      });
-      void this.persistSessionUpdate(session.id, n.update);
-    });
-
-    acp.onRequest("session/request_permission", async (params) => {
-      const p = params as RequestPermissionParams;
-      return this.relayPermission(session, p);
-    });
-
-    acp.onRequest("fs/read_text_file", async (params) => {
-      return readTextFile(params as ReadTextFileParams) as Promise<ReadTextFileResult>;
-    });
-    acp.onRequest("fs/write_text_file", async (params) => {
-      return writeTextFile(params as WriteTextFileParams);
-    });
-
-    acp.onRequest("terminal/create", async (params) => {
-      return session.terminals.create(params as TerminalCreateParams);
-    });
-    acp.onRequest("terminal/output", async (params) => {
-      return session.terminals.output(params as TerminalOutputParams);
-    });
-    acp.onRequest("terminal/wait_for_exit", async (params) => {
-      return session.terminals.wait(params as TerminalWaitParams);
-    });
-    acp.onRequest("terminal/kill", async (params) => {
-      return session.terminals.kill(params as TerminalKillParams);
-    });
-    acp.onRequest("terminal/release", async (params) => {
-      return session.terminals.release(params as TerminalReleaseParams);
-    });
-
-    acp.on("close", () => {
-      this.sessions.delete(session.id);
-      this.send({ type: "session_closed", sessionId: session.id });
-    });
-    acp.on("error", (err: Error) => {
-      this.send({
-        type: "error",
-        sessionId: session.id,
-        message: `Agent process error: ${err.message}`,
-      });
-    });
-  }
-
-  private relayPermission(
-    session: ActiveSession,
-    p: RequestPermissionParams,
-  ): Promise<RequestPermissionResult> {
-    const requestId = randomUUID();
-    return new Promise<RequestPermissionResult>((resolve) => {
-      session.pendingPermissions.set(requestId, resolve);
-      this.send({
-        type: "permission_request",
-        sessionId: session.id,
-        requestId,
-        toolCall: p.toolCall,
-        options: p.options as PermissionOption[],
-      });
-    });
-  }
-
-  // ---- persistence --------------------------------------------------------
-
-  private persistSessionUpdate(id: string, update: SessionUpdate) {
-    return store.update(id, (s) => {
-      s.transcript.push({
-        kind: "session_update",
-        at: new Date().toISOString(),
-        update,
-      });
-      s.lastActiveAt = new Date().toISOString();
-    });
-  }
-
-  private persistPromptComplete(id: string, stopReason: string) {
-    return store.update(id, (s) => {
-      s.transcript.push({
-        kind: "prompt_complete",
-        at: new Date().toISOString(),
-        stopReason,
-      });
-      s.lastActiveAt = new Date().toISOString();
-    });
-  }
-
-  private requireSession(id: string): ActiveSession {
-    const s = this.sessions.get(id);
-    if (!s) throw new Error(`Unknown session: ${id}`);
-    return s;
-  }
-}
-
-function derivePromptTitle(prompt: ContentBlock[]): string {
-  for (const b of prompt) {
-    if (b.type === "text" && b.text.trim()) {
-      return b.text.trim().slice(0, 80);
-    }
-  }
-  return "Untitled session";
 }

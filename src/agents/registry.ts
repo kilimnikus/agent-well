@@ -89,10 +89,10 @@ export const BUILTIN_AGENTS: AgentDefinition[] = [
   {
     id: "pi",
     name: "Pi coding agent",
-    description: "Pi coding agent",
-    command: "pi",
-    args: ["acp"],
-    installHint: "See Pi coding agent docs",
+    description: "Pi coding agent via pi-acp",
+    command: "pi-acp",
+    args: [],
+    installHint: "npm install -g pi-acp",
   },
 ];
 

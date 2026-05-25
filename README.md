@@ -58,27 +58,34 @@ agent.
 
 ## Run
 
-Create `.env` in the project root (gitignored) to set your ngrok
-hostname — the source has no default, so without this you get the LAN
-URL only:
-
-```ini
-# .env
-AGENT_WELL_NGROK_URL=your-reserved.ngrok.io
-```
-
-Then:
-
 ```bash
 npm start
 ```
 
-`npm start` runs `node --env-file-if-exists=.env dist/index.js` and, when
-`AGENT_WELL_NGROK_URL` is set, spawns `ngrok http --url=$AGENT_WELL_NGROK_URL 7777`
-so the QR points at a public tunnel — you can scan it from any phone,
-anywhere. ngrok must be installed and authenticated locally. Leave the
-variable unset (or delete `.env`) to skip the tunnel and use the LAN URL
-only.
+`npm start` runs `node --env-file-if-exists=.env dist/index.js` and, by
+default, spawns `ngrok http <port>` to expose the server over a public
+tunnel. The QR points at that tunnel so you can scan it from any phone,
+anywhere. ngrok must be installed and authenticated locally.
+
+There are two tunnel modes, switched by `AGENT_WELL_NGROK_URL`:
+
+- **Reserved hostname** — set in `.env`:
+
+  ```ini
+  # .env
+  AGENT_WELL_NGROK_URL=your-reserved.ngrok.io
+  ```
+
+  agent-well runs `ngrok http --url=$AGENT_WELL_NGROK_URL <port>` so the
+  hostname is stable across launches.
+
+- **Ephemeral hostname (default)** — leave `AGENT_WELL_NGROK_URL` unset.
+  agent-well runs `ngrok http <port>` and discovers the assigned hostname
+  via ngrok's local inspector API (`http://127.0.0.1:4040/api/tunnels`).
+  The hostname changes on every launch.
+
+To skip ngrok entirely (LAN/localhost only), set
+`AGENT_WELL_NGROK_DISABLE=1`.
 
 The server prints a QR code plus the relevant URLs:
 
@@ -108,8 +115,12 @@ pick an agent and working directory, and start chatting.
 All variables can be set in `.env` (loaded via `--env-file-if-exists=.env`)
 or via the shell environment.
 
-- `AGENT_WELL_NGROK_URL` — ngrok reserved hostname. Unset or empty
-  disables the tunnel.
+- `AGENT_WELL_NGROK_URL` — ngrok reserved hostname. Unset/empty falls
+  back to an ephemeral hostname (discovered via ngrok's local API).
+- `AGENT_WELL_NGROK_DISABLE` — set to `1` to skip ngrok entirely
+  (LAN/localhost only).
+- `NGROK_API_PORT` — port for ngrok's local inspector API used to
+  discover the ephemeral hostname (default `4040`).
 - `AGENT_WELL_HOST` — bind host (default `0.0.0.0` so phones on your
   LAN can reach the server). Set to `127.0.0.1` to restrict to the
   local machine.
@@ -120,6 +131,9 @@ or via the shell environment.
 
 ## Notes
 
+- Only Claude Agent and Pi have actually been exercised so far. The other
+  agents are wired up via `src/agents/registry.ts` but untested — PRs with
+  fixes, install hints, or new agents are very welcome.
 - The server binds to `0.0.0.0` by default so other devices on your LAN
   (e.g., your phone) can connect. The 192-bit per-launch token in the
   URL is the security boundary: anyone who has the URL can drive the

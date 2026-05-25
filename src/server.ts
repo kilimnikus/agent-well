@@ -4,6 +4,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EMBED_PREAMBLE } from "./bridge.js";
+import { SessionRegistry } from "./sessions/registry.js";
 import { TransportRegistry } from "./transport.js";
 import { logger } from "./util/log.js";
 
@@ -36,6 +38,7 @@ export interface ServerOptions {
 export interface RunningServer {
   http: http.Server;
   registry: TransportRegistry;
+  sessions: SessionRegistry;
   token: string;
   localUrl: string;
   lanUrl?: string;
@@ -44,7 +47,8 @@ export interface RunningServer {
 export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const host = opts.host ?? "0.0.0.0";
   const token = randomBytes(24).toString("hex");
-  const registry = new TransportRegistry();
+  const sessions = new SessionRegistry(EMBED_PREAMBLE);
+  const registry = new TransportRegistry(sessions);
 
   const httpServer = http.createServer(async (req, res) => {
     try {
@@ -73,7 +77,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const localUrl = `http://127.0.0.1:${port}/?token=${token}`;
   const lanUrl = lanIp ? `http://${lanIp}:${port}/?token=${token}` : undefined;
 
-  return { http: httpServer, registry, token, localUrl, lanUrl };
+  return { http: httpServer, registry, sessions, token, localUrl, lanUrl };
 }
 
 export function getLanIp(): string | undefined {

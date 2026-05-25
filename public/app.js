@@ -90,6 +90,12 @@ const state = {
 
 const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 
+/** Active poll AbortController so wake events (visibilitychange, online) can
+ *  cancel a stale long-poll on iOS, where suspended fetches don't resume. */
+let pollAbort = null;
+/** When sleeping in backoff, this resolver wakes the loop early. */
+let backoffWake = null;
+
 async function connect() {
   // Persist clientId per tab so a refresh tries to reattach to the same
   // bridge if it's still around (within the server's idle window).
@@ -109,15 +115,21 @@ async function pollLoop() {
   let attempt = 0;
   while (true) {
     try {
+      pollAbort = new AbortController();
       const res = await fetch(
         `/api/events?since=${state.since}`,
-        { headers: { "X-Client-Id": state.clientId } },
+        { headers: { "X-Client-Id": state.clientId }, signal: pollAbort.signal },
       );
       if (res.status === 410) {
-        // Server forgot us (idle timeout or restart). Get a fresh bridge.
+        // Server forgot the transport bridge. The session-host registry is
+        // separate, so agents may still be running — but our in-memory live
+        // session map is now stale (it referenced the dead bridge). Drop it
+        // and let `ready` repopulate the sidebar; auto-reattach kicks in for
+        // the previously active session.
         sessionStorage.removeItem("agent-well-client-id");
         state.clientId = null;
         state.since = 0;
+        resetForReconnect();
         await connect();
         return;
       }
@@ -128,15 +140,63 @@ async function pollLoop() {
       sidebar.status.textContent = "connected";
       for (const ev of data.events ?? []) onServerMessage(ev);
     } catch (err) {
+      if (err?.name === "AbortError") {
+        // Woken by visibility/online: retry immediately without backoff.
+        attempt = 0;
+        continue;
+      }
       attempt += 1;
       sidebar.status.textContent =
         attempt > 1 ? `reconnecting… (${attempt})` : "reconnecting…";
       const wait = RECONNECT_BACKOFF_MS[
         Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)
       ];
-      await new Promise((r) => setTimeout(r, wait));
+      await new Promise((r) => {
+        const t = setTimeout(() => {
+          backoffWake = null;
+          r();
+        }, wait);
+        backoffWake = () => {
+          clearTimeout(t);
+          backoffWake = null;
+          r();
+        };
+      });
     }
   }
+}
+
+/** Cancel any in-flight long-poll and wake any backoff sleep. */
+function wakePoll() {
+  pollAbort?.abort();
+  backoffWake?.();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") wakePoll();
+});
+window.addEventListener("online", wakePoll);
+window.addEventListener("pageshow", (e) => {
+  // iOS bfcache restore: the page resumes without re-running scripts. Force a
+  // poll so we surface the real connection state immediately.
+  if (e.persisted) wakePoll();
+});
+
+/** Drop live-session state after the transport bridge was lost. Sidebar list
+ *  refreshes from the next `ready` event; the auto-reattach there resumes the
+ *  previously active session if it's still running on the server. */
+function resetForReconnect() {
+  state.sessions.clear();
+  state.activeId = null;
+  state.pendingNew.clear();
+  state.pendingPermission = null;
+  permModal.root.classList.add("hidden");
+  authModal.root.classList.add("hidden");
+  view.empty.classList.remove("hidden");
+  view.session.classList.add("hidden");
+  topbar.title.textContent = "agent-well";
+  view.transcript.replaceChildren();
+  view.stopReason.textContent = "";
 }
 
 function send(msg) {
@@ -183,6 +243,7 @@ function onServerMessage(msg) {
       state.listedSessions = msg.sessions ?? [];
       populateAgents();
       renderSessionList();
+      autoReattach();
       break;
     case "sessions":
       state.listedSessions = msg.sessions ?? [];
@@ -292,6 +353,8 @@ function activateSession(s) {
 
 function setActive(id) {
   state.activeId = id;
+  if (id) sessionStorage.setItem("agent-well-active-session", id);
+  else sessionStorage.removeItem("agent-well-active-session");
   const s = state.sessions.get(id);
   if (!s) {
     view.empty.classList.remove("hidden");
@@ -402,11 +465,39 @@ function onSessionLoaded(msg) {
     agentId: msg.agentId,
     cwd: msg.cwd,
     title: undefined,
-    busy: false,
+    busy: !!msg.busy,
     bufferedTranscript: msg.transcript ?? [],
   };
   state.sessions.set(msg.sessionId, session);
   setActive(msg.sessionId);
+  // If the agent was mid-prompt when we (re)attached, surface the waiting
+  // chrome immediately so the user knows we're listening for the response.
+  if (session.busy) {
+    view.stopReason.textContent = "";
+    updateBusyChrome();
+  }
+}
+
+/** After a transport reconnect, if a session was active before and is still
+ *  listed (i.e. exists on disk), automatically re-request `load_session` for
+ *  it. The server-side host may still be live (agent still working) — in that
+ *  case we just re-attach and the buffered transcript + busy flag put the UI
+ *  back into the right state. */
+function autoReattach() {
+  const targetId = sessionStorage.getItem("agent-well-active-session");
+  if (!targetId) return;
+  if (state.sessions.has(targetId)) return; // already live in this tab
+  const listed = state.listedSessions.find((s) => s.id === targetId);
+  if (!listed) {
+    sessionStorage.removeItem("agent-well-active-session");
+    return;
+  }
+  send({
+    type: "load_session",
+    sessionId: listed.id,
+    agentId: listed.agentId,
+    cwd: listed.cwd,
+  });
 }
 
 function onSessionBusy(msg) {
@@ -621,9 +712,7 @@ authModal.skip.addEventListener("click", hideAuthModal);
 function onSessionClosed(msg) {
   state.sessions.delete(msg.sessionId);
   if (state.activeId === msg.sessionId) {
-    state.activeId = null;
-    view.empty.classList.remove("hidden");
-    view.session.classList.add("hidden");
+    setActive(null);
   }
   renderSessionList();
 }
@@ -632,9 +721,7 @@ function onSessionDeleted(msg) {
   state.listedSessions = state.listedSessions.filter((s) => s.id !== msg.sessionId);
   state.sessions.delete(msg.sessionId);
   if (state.activeId === msg.sessionId) {
-    state.activeId = null;
-    view.empty.classList.remove("hidden");
-    view.session.classList.add("hidden");
+    setActive(null);
   }
   renderSessionList();
 }

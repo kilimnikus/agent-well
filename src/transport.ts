@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { BrowserBridge } from "./bridge.js";
+import { SessionRegistry } from "./sessions/registry.js";
 import { logger } from "./util/log.js";
 
 interface QueuedEvent {
@@ -70,10 +71,16 @@ interface Connection {
 const IDLE_MS = 5 * 60 * 1000; // 5 minutes
 const SWEEP_MS = 30 * 1000;
 
+/**
+ * Tracks open browser connections. Idle connections are reaped after IDLE_MS,
+ * but reaping only releases the HTTP transport — agent sessions live in a
+ * separate registry that survives transport loss, so a phone screen lock
+ * doesn't kill in-flight work.
+ */
 export class TransportRegistry {
   private conns = new Map<string, Connection>();
 
-  constructor() {
+  constructor(private sessions: SessionRegistry) {
     setInterval(() => this.sweepIdle(), SWEEP_MS).unref();
   }
 
@@ -82,25 +89,12 @@ export class TransportRegistry {
     const queue = new EventQueue();
     const bridge = new BrowserBridge(
       (msg) => queue.enqueue(msg),
-      (sessionId) => this.isSessionLive(sessionId),
+      this.sessions,
     );
     const conn: Connection = { id, bridge, queue, lastActivity: Date.now() };
     this.conns.set(id, conn);
     logger.info(`transport: connected ${id} (${this.conns.size} active)`);
     return conn;
-  }
-
-  /**
-   * True iff some live bridge already owns an ACP process for this session.
-   * Used to reject a second `load_session` on the same id (e.g. after a page
-   * reload while the first tab's ACP is still mid-prompt) so two agents don't
-   * race on the same transcript file.
-   */
-  isSessionLive(sessionId: string): boolean {
-    for (const c of this.conns.values()) {
-      if (c.bridge.hasSession(sessionId)) return true;
-    }
-    return false;
   }
 
   get(id: string): Connection | undefined {

@@ -76,7 +76,7 @@ export function save(session: StoredSession): Promise<void> {
   return withLock(session.id, () => writeAtomic(session));
 }
 
-export async function load(id: string): Promise<StoredSession | null> {
+async function readInner(id: string): Promise<StoredSession | null> {
   try {
     const raw = await readFile(filePath(id), "utf8");
     return JSON.parse(raw) as StoredSession;
@@ -85,6 +85,10 @@ export async function load(id: string): Promise<StoredSession | null> {
     logger.error("session load failed", err);
     return null;
   }
+}
+
+export function load(id: string): Promise<StoredSession | null> {
+  return withLock(id, () => readInner(id));
 }
 
 /**
@@ -97,7 +101,7 @@ export function update(
   mutator: (s: StoredSession) => void | Promise<void>,
 ): Promise<StoredSession | null> {
   return withLock(id, async () => {
-    const s = await load(id);
+    const s = await readInner(id);
     if (!s) return null;
     await mutator(s);
     await writeAtomic(s);
