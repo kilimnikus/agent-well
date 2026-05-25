@@ -220,9 +220,15 @@ async function postJson(path, body) {
   return res.json();
 }
 
-// Best-effort cleanup on tab close so the server can release the bridge
-// immediately rather than waiting for the idle timeout.
-window.addEventListener("pagehide", () => {
+// Best-effort cleanup on real tab close so the server can release the bridge
+// immediately rather than waiting for the idle timeout. We deliberately skip
+// the disconnect when `persisted` is true — that's iOS bfcache (screen lock,
+// app switch) and the page WILL come back. Disconnecting there would throw
+// away the seq-buffered event replay and force a full transcript reload via
+// `load_session` on resume, with no good way to recover any updates that
+// arrived while the screen was locked.
+window.addEventListener("pagehide", (e) => {
+  if (e.persisted) return;
   if (!state.clientId) return;
   const blob = new Blob([JSON.stringify({})], { type: "application/json" });
   // sendBeacon doesn't let us set custom headers, so we include clientId in

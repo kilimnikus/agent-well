@@ -262,6 +262,10 @@ export class BrowserBridge {
       host.detach(this.sink);
       host.close();
     }
+    // The host's own session_closed emit fires after we've already detached,
+    // so it never reaches the browser. Send it directly to this tab so the
+    // UI returns to the empty state.
+    this.send({ type: "session_closed", sessionId: msg.sessionId });
   }
 
   private async cmdDeleteSession(msg: { sessionId: string }) {
